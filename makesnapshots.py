@@ -120,6 +120,9 @@ if sns_arn:
             sns = boto.sns.connect_to_region(ec2_region_name, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
         else:
             sns = boto.sns.connect_to_region(ec2_region_name)
+    if not sns:
+	print "NO VALID REGION %s" % ec2_region_name
+
 
 def get_resource_tags(resource_id):
     resource_tags = {}
@@ -145,6 +148,8 @@ def set_resource_tags(resource, tags):
 print 'Finding volumes that match the requested tag ({ "tag:%(tag_name)s": "%(tag_value)s" })' % config
 vols = conn.get_all_volumes(filters={ 'tag:' + config['tag_name']: config['tag_value'] })
 
+all_snapshots = []
+
 for vol in vols:
     try:
         count_total += 1
@@ -158,6 +163,7 @@ for vol in vols:
         }
         try:
             current_snap = vol.create_snapshot(description)
+            all_snapshots.append(current_snap)
             set_resource_tags(current_snap, tags_volume)
             suc_message = 'Snapshot created with description: %s and tags: %s' % (description, str(tags_volume))
             print '     ' + suc_message
@@ -214,6 +220,22 @@ for vol in vols:
     else:
         count_success += 1
 
+print 'Waitinig for snapshots'
+print all_snapshots
+while True:
+    snap_counter = len(all_snapshots)
+    for snap in all_snapshots:
+        snap.update()
+        if snap.status != 'pending':
+            snap_counter -= 1
+        if snap.status == 'error':
+            count_errors += 1
+    if snap_counter > 0:
+        print 'Still %s pending' % snap_counter
+    	time.sleep(5)
+    else:
+	break
+
 result = '\nFinished making snapshots at %(date)s with %(count_success)s snapshots of %(count_total)s possible.\n\n' % {
     'date': datetime.today().strftime('%d-%m-%Y %H:%M:%S'),
     'count_success': count_success,
@@ -235,4 +257,3 @@ if sns_arn:
     sns.publish(sns_arn, message, 'Finished AWS snapshotting')
 
 logging.info(result)
-
