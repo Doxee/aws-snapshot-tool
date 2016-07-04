@@ -29,6 +29,7 @@ import sys
 import logging
 from config import config
 
+DRY_RUN=False
 
 if (len(sys.argv) < 2):
     print('Please add a positional argument: day, week or month.')
@@ -120,6 +121,9 @@ if sns_arn:
             sns = boto.sns.connect_to_region(ec2_region_name, aws_access_key_id=aws_access_key, aws_secret_access_key=aws_secret_key)
         else:
             sns = boto.sns.connect_to_region(ec2_region_name)
+    if not sns:
+	print "NO VALID REGION %s" % ec2_region_name
+
 
 def get_resource_tags(resource_id):
     resource_tags = {}
@@ -139,14 +143,19 @@ def set_resource_tags(resource, tags):
                 'tag_key': tag_key,
                 'tag_value': tag_value
             }
-            resource.add_tag(tag_key, tag_value)
+            resource.add_tag(tag_key, tag_value, dry_run=DRY_RUN)
 
 # Get all the volumes that match the tag criteria
 print 'Finding volumes that match the requested tag ({ "tag:%(tag_name)s": "%(tag_value)s" })' % config
 vols = conn.get_all_volumes(filters={ 'tag:' + config['tag_name']: config['tag_value'] })
 
+all_snapshots = []
+report = {}
 for vol in vols:
     try:
+	attached_instance = vol.attach_data.instance_id
+	environment = get_resource_tags(attached_instance)['Environment']
+	instance_name = get_resource_tags(attached_instance)['Name']
         count_total += 1
         logging.info(vol)
         tags_volume = get_resource_tags(vol.id)
@@ -157,16 +166,24 @@ for vol in vols:
             'date': datetime.today().strftime('%d-%m-%Y %H:%M:%S')
         }
         try:
-            current_snap = vol.create_snapshot(description)
+            logging.info("snapshot of %s " % description )
+            current_snap = vol.create_snapshot(description, dry_run=DRY_RUN)
+            all_snapshots.append(current_snap)
+            report[current_snap.id] = {
+                "environment": environment,
+		"instance_name" : instance_name,
+            }
+            logging.info("snapshot tagging of %s " % description )
             set_resource_tags(current_snap, tags_volume)
             suc_message = 'Snapshot created with description: %s and tags: %s' % (description, str(tags_volume))
             print '     ' + suc_message
             logging.info(suc_message)
             total_creates += 1
         except Exception, e:
-            print "Unexpected error:", sys.exc_info()[0]
+            print "Unexpected error:", e
             logging.error(e)
             pass
+
 
         snapshots = vol.snapshots()
         deletelist = []
@@ -203,7 +220,7 @@ for vol in vols:
         for i in range(delta):
             del_message = '     Deleting snapshot ' + deletelist[i].description
             logging.info(del_message)
-            deletelist[i].delete()
+            deletelist[i].delete(DRY_RUN)
             total_deletes += 1
         time.sleep(3)
     except:
@@ -213,6 +230,22 @@ for vol in vols:
         count_errors += 1
     else:
         count_success += 1
+
+while True:
+    snap_counter = len(all_snapshots)
+    for snap in all_snapshots:
+        snap.update()
+        if snap.status != 'pending':
+            snap_counter -= 1
+        if snap.status == 'error':
+            report[snap.id]['error'] = True
+            count_errors += 1
+            errmsg += 'Error in processing volume with id: ' + snap.id
+    if snap_counter > 0:
+        print 'Still %s pending' % snap_counter
+    	time.sleep(5)
+    else:
+	break
 
 result = '\nFinished making snapshots at %(date)s with %(count_success)s snapshots of %(count_total)s possible.\n\n' % {
     'date': datetime.today().strftime('%d-%m-%Y %H:%M:%S'),
@@ -225,6 +258,11 @@ message += "\nTotal snapshots created: " + str(total_creates)
 message += "\nTotal snapshots errors: " + str(count_errors)
 message += "\nTotal snapshots deleted: " + str(total_deletes) + "\n"
 
+for k, snap_report in report.iteritems():
+    print k
+    print snap_report
+    message += "\n Environment %s Instance: %s %s" % (snap_report['environment'], snap_report['instance_name'], "Failed" if snap_report.has_key('error') else "Succeed" )
+
 print '\n' + message + '\n'
 print result
 
@@ -235,4 +273,3 @@ if sns_arn:
     sns.publish(sns_arn, message, 'Finished AWS snapshotting')
 
 logging.info(result)
-
